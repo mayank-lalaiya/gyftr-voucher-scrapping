@@ -46,10 +46,12 @@ def process_pubsub_message(cloud_event):
         # Gen 2 CloudEvent data structure for Pub/Sub:
         # cloud_event.data = {"message": {"data": "base64...", "attributes": ...}, "subscription": ...}
         data = cloud_event.data
+        history_id = None
         if "message" in data and "data" in data["message"]:
             pubsub_message = base64.b64decode(data["message"]["data"]).decode('utf-8')
             try:
                 message_data = json.loads(pubsub_message)
+                history_id = message_data.get('historyId')
                 print(f"Received notification: historyId={message_data.get('historyId', 'N/A')}, email={message_data.get('emailAddress', 'N/A')}")
             except json.JSONDecodeError:
                 print(f"Received raw message: {pubsub_message}")
@@ -61,8 +63,19 @@ def process_pubsub_message(cloud_event):
         print("--- Processing GyFTR Emails ---")
         
         # Core Logic: Fetch and Process GyFTR Emails
+        # Use Gmail History API (historyId from Pub/Sub) so even READ emails get captured.
         gyftr_service = factory.get_gyftr_processing_service()
-        result = gyftr_service.process_new_gyftr_emails(source="cloud_function_automation")
+        if history_id:
+            result = gyftr_service.process_from_gmail_history(
+                current_history_id=str(history_id),
+                source="cloud_function_automation",
+            )
+        else:
+            # Fallback if notification payload doesn't include historyId for any reason
+            result = gyftr_service.process_new_gyftr_emails(
+                source="cloud_function_automation",
+                include_read=True,
+            )
         
         print(f"Result: {json.dumps(result)}")
 

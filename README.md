@@ -131,6 +131,13 @@ Run this script to enable Cloud Functions and triggers.
 **Q: I get "403 Permission Denied" when writing to Sheets.**
 *   A: Make sure the Google Sheets API is enabled. If running in the cloud, ensure `deploy.sh` was run *after* enabling the APIs.
 
+**Q: I opened (read) the voucher email and it didn't get added.**
+*   A: Cloud mode supports READ emails (it uses Gmail push `historyId` + Gmail History API). If it’s not updating:
+    *   Re-enable Gmail Watch: `python scripts/enable_cloud_watch.py`
+    *   Check logs (Gen2 runs on Cloud Run):
+        `gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="gyftr-automation-v1"' --limit=50 --freshness=1h`
+    *   The bot stores a cursor in the spreadsheet under a `_config` tab (`LAST_GMAIL_HISTORY_ID`).
+
 ## 💰 Cost & Limits
 
 For typical personal use, this project runs entirely within the **Google Cloud Free Tier**.
@@ -147,7 +154,7 @@ For typical personal use, this project runs entirely within the **Google Cloud F
 
 ### System Limits
 
-1.  **Batch Size**: The scanner checks the **last 50 emails** from `gifts@gyftr.com`. If you have more than 50 *new* unread emails at once, run the backfill script multiple times.
+1.  **Batch Size**: Cloud mode processes incrementally (Gmail History API) and caps the number of messages processed per run. Local backfill can scan larger ranges in batches.
 2.  **Execution Time**: The Cloud Function has a default timeout of 60 seconds. Scanning 50 emails takes ~20-30 seconds.
 3.  **API Quotas**:
     *   **Gmail**: 1,000,000,000 units/day (This script uses ~500 units/run).
@@ -159,6 +166,14 @@ For typical personal use, this project runs entirely within the **Google Cloud F
 *   **Your Data**: This code runs on **your** own Google Cloud project.
 *   **Your Credentials**: Your `credentials.json` and `token.json` stay on your machine (or your private cloud instance).
 *   **No 3rd Party**: No data is sent to any external server. It goes directly from your Gmail -> Your Script -> Your Google Sheet.
+
+### Publishing to GitHub (Important)
+
+*   This repo uses `.gitignore` to prevent committing secrets like `.env`, `token.json`, and `credentials.json`.
+*   Double-check these files are NOT tracked before pushing:
+    `git ls-files token.json credentials.json .env`
+*   Avoid pasting raw `gcloud functions deploy ...` output into issues/chats. GCP can print environment variables in CLI output.
+*   If you accidentally exposed `CLIENT_SECRET` or `REFRESH_TOKEN`, rotate them in Google Cloud Console and re-run `python scripts/setup_auth.py`.
 
 ## 🤝 Contributing
 

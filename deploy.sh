@@ -66,6 +66,8 @@ echo "   - Region:   $REGION"
 echo "   - Trigger:  $PUBSUB_TOPIC"
 
 # 4. Deploy
+DEPLOY_LOG_FILE="$(mktemp -t gyftr_deploy_XXXXXX.log)"
+
 if gcloud functions deploy $FUNCTION_NAME \
     --gen2 \
     --region=$REGION \
@@ -78,10 +80,12 @@ if gcloud functions deploy $FUNCTION_NAME \
     --set-env-vars CLIENT_ID="$CLIENT_ID" \
     --set-env-vars CLIENT_SECRET="$CLIENT_SECRET" \
     --set-env-vars REFRESH_TOKEN="$REFRESH_TOKEN" \
-    --quiet; then
+    --quiet >"$DEPLOY_LOG_FILE" 2>&1; then
 
     echo -e "\n${GREEN}🎉 Deployment Successful!${NC}"
     echo "   Your bot is now live and listening for emails."
+    echo "   View in Cloud Console: https://console.cloud.google.com/functions/details/$REGION/$FUNCTION_NAME?project=$PROJECT_ID"
+    echo "   (Deploy logs saved to: $DEPLOY_LOG_FILE)"
 
     # 5. Cleanup Old Images (Cost Optimization)
     echo -e "\n${YELLOW}🧹 Cleaning up old container images (keeping latest 2)...${NC}"
@@ -120,7 +124,9 @@ if gcloud functions deploy $FUNCTION_NAME \
 else
     echo -e "\n${RED}❌ Deployment Failed.${NC}"
 
-    echo "   Check the error log above for details."
+    echo "   Deploy logs saved to: $DEPLOY_LOG_FILE"
+    echo "   --- Last 40 lines ---"
+    tail -n 40 "$DEPLOY_LOG_FILE" || true
     echo "   Common issues:"
     echo "   - Cloud Build API not enabled (Run setup_gcp_infra.sh)"
     echo "   - Billing not enabled on project"
