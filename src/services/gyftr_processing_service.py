@@ -51,8 +51,13 @@ class GyftrProcessingService:
 
         try:
             # 1. Fetch emails from GyFTR
+            # Query: Strictly matches emails from the official sender
+            # Note: We cannot rely on Pub/Sub notification content as it does not contain the message ID.
+            # We must query the mailbox for new messages.
             query = 'from:gifts@gyftr.com'
             if not include_read:
+                # IMPORTANT: If we are in automation mode, we MUST filter by unread.
+                # Otherwise, we will loop infinitely on old emails that failed parsing.
                 query += ' is:unread'
 
             print(f"Fetching recent GyFTR emails with query: '{query}'")
@@ -110,21 +115,24 @@ class GyftrProcessingService:
                             all_new_vouchers.append(v)
                         
                         # Mark as read (idempotent)
-
                         self.gmail_repo.mark_as_read(msg_id)
                         result['vouchers_found'] += len(vouchers)
                     else:
-                        pass
-                        # print(f"  -> No vouchers found in {msg_id}")
+                        # Fallback: Mark as read even if no vouchers found to prevent infinite looping
+                        # on supported emails.
+                        print(f"  -> No vouchers found in {msg_id}. Marking as read to skip next time.")
+                        self.gmail_repo.mark_as_read(msg_id)
                         
                 except Exception as e:
                     error_msg = f"Error processing GyFTR email {msg_id}: {str(e)}"
                     print(f"✗ {error_msg}")
                     result['errors'].append(error_msg)
 
-            # 2. Append to Google Sheet
+            # 2. Update to Google Sheet
             if all_new_vouchers:
-                self._append_to_sheet(all_new_vouchers)
+                # If Automation: Insert at Top. If Backfill: Append to Bottom.
+                insert_at_top = (source != 'backfill')
+                self._update_sheet(all_new_vouchers, insert_at_top=insert_at_top)
                 result['rows_added'] = len(all_new_vouchers)
 
         except Exception as e:
@@ -152,8 +160,8 @@ class GyftrProcessingService:
                 return base64.urlsafe_b64decode(data).decode('utf-8')
         return None
 
-    def _append_to_sheet(self, vouchers: List[Dict[str, Any]]):
-        """Appends vouchers to the existing sheet."""
+    def _update_sheet(self, vouchers: List[Dict[str, Any]], insert_at_top: bool = False):
+        """Updates the Google Sheet with new vouchers."""
         service = self.get_sheets_service()
         # Use settings ID
         spreadsheet_id = self.settings.gyftr_spreadsheet_id
@@ -179,10 +187,62 @@ class GyftrProcessingService:
                 spreadsheetId=spreadsheet_id, range=f"{sheet_title}!A1",
                 valueInputOption="USER_ENTERED", body={'values': [headers]}
             ).execute()
+            
+            # Set Column Formats (Expiry -> Date)
+            try:
+                sheet_id = sheets[0]['properties']['sheetId']
+                expiry_col_index = headers.index('Expiry')
+                created_at_col_index = headers.index('Created At')
+                
+                requests = [
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startColumnIndex": expiry_col_index,
+                                "endColumnIndex": expiry_col_index + 1
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "numberFormat": {
+                                        "type": "DATE",
+                                        "pattern": "d-mmm-yyyy"
+                                    }
+                                }
+                            },
+                            "fields": "userEnteredFormat.numberFormat"
+                        }
+                    },
+                     {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startColumnIndex": created_at_col_index,
+                                "endColumnIndex": created_at_col_index + 1
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "numberFormat": {
+                                        "type": "DATE_TIME",
+                                        "pattern": "yyyy-mm-dd hh:mm:ss"
+                                    }
+                                }
+                            },
+                            "fields": "userEnteredFormat.numberFormat"
+                        }
+                    }
+                ]
+                service.spreadsheets().batchUpdate(
+                    spreadsheetId=spreadsheet_id, body={'requests': requests}
+                ).execute()
+                print("✅ Applied Date formatting to 'Expiry' and 'Created At' columns.")
+            except Exception as e:
+                print(f"⚠️ Warning: Could not set date formatting: {e}")
         else:
              # Ensure new columns exist in headers if they don't
             updates_needed = False
-            for col in ['Added By', 'Created At']:
+            # Check for Logo and Email Date as well, as they might be missing in older sheets
+            for col in ['Logo', 'Email Date', 'Added By', 'Created At']:
                 if col not in headers:
                     headers.append(col)
                     updates_needed = True
@@ -238,8 +298,13 @@ class GyftrProcessingService:
                 if header == 'Valid Till': key = 'Expiry'
                 
                 val = v.get(key, '')
-                if key == 'Code' and val:
-                    val = f"'{val}" # Force text format
+                # Force specific fields to be treated as TEXT to prevent Sheets from
+                # converting them to random serial numbers (e.g. 46354 instead of a date)
+                if val and key == 'Code':
+                    val = f"'{val}"
+                # NOTE: We do NOT force Expiry to reference text (') anymore,
+                # because we want them to be sortable Date objects in Sheets.
+                # The user must ensure the column format is set to Date in Sheets.
                 row.append(val)
             rows_to_append.append(row)
 
@@ -247,10 +312,49 @@ class GyftrProcessingService:
             print("No new unique vouchers to append.")
             return
 
-        # Append data
+        # Strategy: Insert At Top vs Append
+        if insert_at_top:
+            self._insert_rows_at_top(service, spreadsheet_id, sheet_title, sheets[0]['properties']['sheetId'], rows_to_append)
+        else:
+            self._append_rows_at_bottom(service, spreadsheet_id, sheet_title, rows_to_append)
+
+    def _insert_rows_at_top(self, service, spreadsheet_id, sheet_title, sheet_id, rows):
+        """Inserts rows at index 1 (Row 2)."""
+        print(f"Inserting {len(rows)} rows at the TOP...")
+        requests = [{
+            "insertDimension": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "dimension": "ROWS",
+                    "startIndex": 1,
+                    "endIndex": 1 + len(rows)
+                },
+                "inheritFromBefore": False
+            }
+        }]
+        
+        try:
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id, 
+                body={'requests': requests}
+            ).execute()
+            
+            service.spreadsheets().values().update(
+                spreadsheetId=spreadsheet_id,
+                range=f"{sheet_title}!A2",
+                valueInputOption="USER_ENTERED",
+                body={'values': rows}
+            ).execute()
+        except Exception as e:
+            print(f"Error inserting top: {e}. Fallback to append.")
+            self._append_rows_at_bottom(service, spreadsheet_id, sheet_title, rows)
+
+    def _append_rows_at_bottom(self, service, spreadsheet_id, sheet_title, rows):
+        """Appends rows to the end of the sheet."""
+        print(f"Appending {len(rows)} rows at the BOTTOM...")
         service.spreadsheets().values().append(
             spreadsheetId=spreadsheet_id, range=f"{sheet_title}!A1",
             valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS",
-            body={'values': rows_to_append}
+            body={'values': rows}
         ).execute()
-        print(f"Appended {len(rows_to_append)} rows to spreadsheet {spreadsheet_id}")
+        print(f"Appended {len(rows)} rows to spreadsheet {spreadsheet_id}")

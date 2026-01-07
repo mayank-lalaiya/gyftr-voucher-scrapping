@@ -5,7 +5,7 @@ Automated system to scan Gmail for GyFTR gift card emails (Myntra, Swiggy, Amazo
 Designed for users who want to organize their vouchers automatically.
 
 ## ✨ Features
-*   **Intelligent Parsing**: Extracts Brand, Value, Code, PIN, and Expiry Date from emails.
+*   **Intelligent Parsing**: Extracts Brand, **Logo**, Value, Code, PIN, Expiry Date, and **Email Date** from emails.
 *   **Deduplication**: Never adds the same voucher twice.
 *   **Dual Modes**:
     1.  **Local Backfill**: Scan your entire history of emails manually (No recurring cost).
@@ -42,7 +42,7 @@ chmod +x scripts/*.sh deploy.sh
     *   **Contact Information**: Enter your email address again for *Developer Contact Information*.
     *   **Finish**: Check the box for **"I agree to the Google API services user data policy"** and click **Continue**.
     *   **Test Users (Critical)**: On the Test Users step, click **Add Users**, enter your Google email address, and click **Save**.
-        *   *Note: Without this, you will get an "Access Blocked" error.*
+        *   *Note: Without this, you will get an "Access Blocked: Authorization Error 403" when logging in.*
     *   Once created, click **Credentials** on the left sidebar to return.
 3.  Click **Create Credentials** -> **OAuth Client ID**.
     *   *Note: If you see a "Metrics" dashboard with a "Create OAuth client" button, click that instead.*
@@ -60,12 +60,16 @@ chmod +x scripts/*.sh deploy.sh
 2.  Your browser will open to a Google permission screen.
     *   Check **Select all** (to allow reading emails and writing to sheets).
     *   Click **Continue**.
-    *   *Note: Since you created this app yourself, Google trusts you implicitly as a Test User. If you ever see a "Not Verified" warning, click Advanced -> Proceed.*
+    *   **"Google hasn't verified this app" Warning**: This is expected because you created the app for personal use.
+        *   Click **Advanced** (small link).
+        *   Click **Go to Gyftr Scraper (unsafe)**.
+        *   Proceed to grant permissions.
 3.  Run the backfill script:
     ```bash
     python scripts/backfill_vouchers.py
     ```
 *   **Result**: You now have a Google Sheet full of your past vouchers!
+    *   *Columns*: Brand, Logo, Value, Code, Pin, Expiry, Email Date, etc.
 *   **Stop here** if you only want to run this manually once in a while.
 
 ---
@@ -117,6 +121,9 @@ Run this script to enable Cloud Functions and triggers.
 ```
 
 ## ❓ Troubleshooting
+
+**Q: I see a warning about "External Images" in Google Sheets.**
+*   A: The Sheet uses links to brand logos extracted from emails. Google Sheets may ask for permission to display these external images. Click "Allow Access" if prompted.
 
 **Q: I get "invalid_grant" or "Token has been expired" error.**
 *   A: Your login token expired or was revoked. Run `python scripts/setup_auth.py` again to re-login.
