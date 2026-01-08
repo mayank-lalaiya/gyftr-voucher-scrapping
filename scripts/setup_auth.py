@@ -63,9 +63,20 @@ def create_spreadsheet(creds):
         spreadsheet_id = spreadsheet.get('spreadsheetId')
         print(f"✅ Created new Spreadsheet: https://docs.google.com/spreadsheets/d/{spreadsheet_id}")
         
-        # Add Headers
+        # Add Headers (canonical schema used by the processing service)
         print("   Adding headers...")
-        headers = [["Brand", "Value", "Code", "Pin", "Expiry", "Scanned Date", "Added By", "Created At"]]
+        headers = [[
+            "Logo",
+            "Brand",
+            "Value",
+            "Code",
+            "Pin",
+            "Expiry",
+            "Email Date",
+            "Message ID",
+            "Added By",
+            "Created At",
+        ]]
         body = {'values': headers}
         service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id, range="Sheet1!A1",

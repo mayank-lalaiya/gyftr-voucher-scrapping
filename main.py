@@ -8,7 +8,6 @@ import os
 import base64
 import json
 from datetime import datetime
-import functions_framework
 
 # Logic to add root to path if running mostly for local debug, 
 # but in Cloud Functions, root is already CWD.
@@ -26,67 +25,57 @@ try:
 except ImportError:
     pass
 
-@functions_framework.cloud_event
-def process_pubsub_message(cloud_event):
-    """
-    Triggered from a message on a Cloud Pub/Sub topic (Gen 2 / CloudEvent).
-    
+def process_pubsub_message_gen1(event, context):
+    """Gen1 Cloud Function entrypoint (Pub/Sub background function).
+
     Args:
-        cloud_event: The CloudEvent object.
+        event: Pub/Sub event payload dict. `event['data']` is base64-encoded bytes.
+        context: Event metadata (unused).
     """
     try:
-        # Initialize factory and dependencies
         factory = ServiceFactory()
-        
-        # Log execution context
-        print(f"Function triggered at {datetime.utcnow().isoformat()}")
-        print(f"Event ID: {cloud_event['id']}")
-        
-        # Decode the Pub/Sub message
-        # Gen 2 CloudEvent data structure for Pub/Sub:
-        # cloud_event.data = {"message": {"data": "base64...", "attributes": ...}, "subscription": ...}
-        data = cloud_event.data
-        history_id = None
-        if "message" in data and "data" in data["message"]:
-            pubsub_message = base64.b64decode(data["message"]["data"]).decode('utf-8')
-            try:
-                message_data = json.loads(pubsub_message)
-                history_id = message_data.get('historyId')
-                print(f"Received notification: historyId={message_data.get('historyId', 'N/A')}, email={message_data.get('emailAddress', 'N/A')}")
-            except json.JSONDecodeError:
-                print(f"Received raw message: {pubsub_message}")
-        
-        # Validate configuration (will raise error if missing env vars)
-
         factory.validate_configuration()
 
+        print(f"Function (gen1) triggered at {datetime.utcnow().isoformat()}")
+
+        history_id = None
+        try:
+            data_b64 = event.get('data')
+            if data_b64:
+                decoded = base64.b64decode(data_b64).decode('utf-8')
+                message_data = json.loads(decoded)
+                history_id = message_data.get('historyId')
+                print(
+                    f"Received notification: historyId={message_data.get('historyId', 'N/A')}, "
+                    f"email={message_data.get('emailAddress', 'N/A')}"
+                )
+            else:
+                print("Received Pub/Sub event with no data")
+        except Exception as e:
+            print(f"Warning: failed to decode Pub/Sub data: {e}")
+
         print("--- Processing GyFTR Emails ---")
-        
-        # Core Logic: Fetch and Process GyFTR Emails
-        # Use Gmail History API (historyId from Pub/Sub) so even READ emails get captured.
         gyftr_service = factory.get_gyftr_processing_service()
+
         if history_id:
             result = gyftr_service.process_from_gmail_history(
                 current_history_id=str(history_id),
                 source="cloud_function_automation",
             )
         else:
-            # Fallback if notification payload doesn't include historyId for any reason
+            # Fallback if payload doesn't include historyId
             result = gyftr_service.process_new_gyftr_emails(
                 source="cloud_function_automation",
                 include_read=True,
             )
-        
-        print(f"Result: {json.dumps(result)}")
 
+        print(f"Result: {json.dumps(result)}")
         print("Processing complete")
         print("==================================================")
-        
         return result
 
     except Exception as e:
         import traceback
         error_msg = f"Critical error in execution: {str(e)}\n{traceback.format_exc()}"
         print(error_msg)
-        # Re-raise to flag execution failure in Cloud Console
-        raise e
+        raise

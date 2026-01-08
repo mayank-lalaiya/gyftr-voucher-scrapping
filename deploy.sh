@@ -22,7 +22,13 @@ fi
 
 # 2. Load Configuration
 if [ -f .env ]; then
-    export $(grep -v '^#' .env | xargs)
+    # More robust than: export $(grep ... | xargs)
+    # - supports values with '='
+    # - avoids word-splitting surprises
+    set -a
+    # shellcheck disable=SC1091
+    source .env
+    set +a
     echo -e "${GREEN}✅ Loaded configuration from .env${NC}"
 else
     echo -e "${RED}❌ Error: .env file not found.${NC}"
@@ -54,13 +60,13 @@ if [ $MISSING_VARS -eq 1 ]; then
     exit 1
 fi
 
-# Defaults
+# Defaults (Gen1 only)
 FUNCTION_NAME="gyftr-automation-v1"
-RUNTIME="python311"
-ENTRY_POINT="process_pubsub_message"
 REGION="${REGION:-us-central1}"
+RUNTIME="python311"
+ENTRY_POINT="process_pubsub_message_gen1"
 
-echo -e "\n${YELLOW}🚀 Deploying to Google Cloud Functions...${NC}"
+echo -e "\n${YELLOW}🚀 Deploying to Google Cloud Functions (Gen1)...${NC}"
 echo "   - Project:  $PROJECT_ID"
 echo "   - Region:   $REGION"
 echo "   - Trigger:  $PUBSUB_TOPIC"
@@ -68,58 +74,29 @@ echo "   - Trigger:  $PUBSUB_TOPIC"
 # 4. Deploy
 DEPLOY_LOG_FILE="$(mktemp -t gyftr_deploy_XXXXXX.log)"
 
-if gcloud functions deploy $FUNCTION_NAME \
-    --gen2 \
-    --region=$REGION \
-    --runtime=$RUNTIME \
+DEPLOY_CMD=(gcloud functions deploy "$FUNCTION_NAME" \
+    --no-gen2 \
+    --region="$REGION" \
+    --runtime="$RUNTIME" \
     --source=. \
-    --entry-point=$ENTRY_POINT \
-    --trigger-topic=$PUBSUB_TOPIC \
-    --project=$PROJECT_ID \
+    --entry-point="$ENTRY_POINT" \
+    --trigger-topic="$PUBSUB_TOPIC" \
+    --project="$PROJECT_ID" \
+    --timeout=60s \
+    --memory=256MB \
+    --max-instances=1 \
     --set-env-vars GYFTR_SPREADSHEET_ID="$GYFTR_SPREADSHEET_ID" \
     --set-env-vars CLIENT_ID="$CLIENT_ID" \
     --set-env-vars CLIENT_SECRET="$CLIENT_SECRET" \
     --set-env-vars REFRESH_TOKEN="$REFRESH_TOKEN" \
-    --quiet >"$DEPLOY_LOG_FILE" 2>&1; then
+    --quiet)
+
+if "${DEPLOY_CMD[@]}" >"$DEPLOY_LOG_FILE" 2>&1; then
 
     echo -e "\n${GREEN}🎉 Deployment Successful!${NC}"
     echo "   Your bot is now live and listening for emails."
     echo "   View in Cloud Console: https://console.cloud.google.com/functions/details/$REGION/$FUNCTION_NAME?project=$PROJECT_ID"
     echo "   (Deploy logs saved to: $DEPLOY_LOG_FILE)"
-
-    # 5. Cleanup Old Images (Cost Optimization)
-    echo -e "\n${YELLOW}🧹 Cleaning up old container images (keeping latest 2)...${NC}"
-    
-    # Define repository details (Standard for Gen 2)
-    REPO_NAME="gcf-artifacts"
-    PACKAGE_NAME="$FUNCTION_NAME" # Usually matches function name directory
-    
-    # Check if we can list versions
-    if gcloud artifacts versions list --package=$PACKAGE_NAME --repository=$REPO_NAME --location=$REGION --project=$PROJECT_ID --limit=1 &>/dev/null; then
-        
-        # List all versions, sort by update time descending, skip top 2, and delete the rest
-        # We keep 2 just to be safe for immediate rollbacks if needed
-        gcloud artifacts versions list \
-            --package=$PACKAGE_NAME \
-            --repository=$REPO_NAME \
-            --location=$REGION \
-            --project=$PROJECT_ID \
-            --sort-by="~UPDATE_TIME" \
-            --format="value(name)" | \
-            tail -n +3 | \
-            while read -r version; do
-                echo "   Deleting old image version: $version"
-                gcloud artifacts versions delete "$version" \
-                    --package=$PACKAGE_NAME \
-                    --repository=$REPO_NAME \
-                    --location=$REGION \
-                    --project=$PROJECT_ID \
-                    --quiet || echo "   (Skipped or failed to delete $version)"
-            done
-            echo -e "${GREEN}✅ Cleanup complete.${NC}"
-    else
-        echo "   (Skipping cleanup: Repository or package not found/accessible yet)"
-    fi
 
 else
     echo -e "\n${RED}❌ Deployment Failed.${NC}"

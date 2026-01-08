@@ -33,7 +33,13 @@ class GyftrProcessingService:
             self._sheets_service = build('sheets', 'v4', credentials=creds)
         return self._sheets_service
 
-    def process_new_gyftr_emails(self, source: str = 'automation', max_results: int = 50, include_read: bool = False) -> dict:
+    def process_new_gyftr_emails(
+        self,
+        source: str = 'automation',
+        max_results: int = 50,
+        include_read: bool = False,
+        page_token: str | None = None,
+    ) -> dict:
         """
         Fetches new unread GyFTR emails, parses them, and appends to the sheet.
         
@@ -42,11 +48,12 @@ class GyftrProcessingService:
             max_results (int): Maximum number of emails to fetch.
             include_read (bool): If True, filters only by 'from:gifts@gyftr.com' (including read emails).
         """
-        result = {
+        result: dict = {
             'emails_checked': 0,
             'vouchers_found': 0,
             'rows_added': 0,
-            'errors': []
+            'errors': [],
+            'next_page_token': None,
         }
 
         try:
@@ -62,9 +69,12 @@ class GyftrProcessingService:
 
             print(f"Fetching recent GyFTR emails with query: '{query}'")
             
-            messages = self.gmail_repo.service.users().messages().list(
-                userId='me', q=query, maxResults=max_results
-            ).execute().get('messages', [])
+            list_req = self.gmail_repo.service.users().messages().list(
+                userId='me', q=query, maxResults=max_results, pageToken=page_token
+            )
+            list_res = list_req.execute()
+            messages = list_res.get('messages', [])
+            result['next_page_token'] = list_res.get('nextPageToken')
 
             result['emails_checked'] = len(messages)
             print(f"Found {len(messages)} GyFTR emails to scan.")

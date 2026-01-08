@@ -46,9 +46,9 @@ def manual_process():
         print("🔧 Initializing services...")
         factory = ServiceFactory()
         
-        # Override credential dictionary in settings to use local token.json if available
-        # This ensures we use the local user token which might be different from 
-        # what's configured in env vars for cloud run.
+        # Override credential dictionary in settings to use local token.json if available.
+        # This ensures we use the local user token which might be different from
+        # what's configured in env vars for cloud execution.
         try:
             with open('token.json', 'r') as f:
                 token_data = json.load(f)
@@ -66,32 +66,58 @@ def manual_process():
         # User Configuration
         print("\n--- 🔧 Scan Settings ---")
         try:
-            limit_input = input("How many emails should we scan? (Default: 50): ").strip()
+            limit_input = input("How many emails per batch should we scan? (Default: 50): ").strip()
             max_results = int(limit_input) if limit_input else 50
             
             read_input = input("Should we include READ/OPENED emails? (y/n, Default: n): ").lower().strip()
             include_read = read_input == 'y'
+
+            all_input = input("Scan ALL matching emails (may take time)? (y/n, Default: n): ").lower().strip()
+            scan_all = all_input == 'y'
         except ValueError:
             print("❌ Invalid number. Using default: 50")
             max_results = 50
             include_read = False
+            scan_all = False
 
-        print("\n📥 Scanning emails (this might take a moment)...")
-        result = service.process_new_gyftr_emails(
-            source="backfill", 
-            max_results=max_results, 
-            include_read=include_read
-        )
+        total = {
+            'emails_checked': 0,
+            'vouchers_found': 0,
+            'rows_added': 0,
+            'errors': [],
+        }
+
+        page_token = None
+        batch_num = 0
+
+        while True:
+            batch_num += 1
+            print(f"\n📥 Scanning emails (batch {batch_num})...")
+            result = service.process_new_gyftr_emails(
+                source="backfill",
+                max_results=max_results,
+                include_read=include_read,
+                page_token=page_token,
+            )
+
+            total['emails_checked'] += int(result.get('emails_checked', 0) or 0)
+            total['vouchers_found'] += int(result.get('vouchers_found', 0) or 0)
+            total['rows_added'] += int(result.get('rows_added', 0) or 0)
+            total['errors'].extend(result.get('errors', []) or [])
+
+            page_token = result.get('next_page_token')
+            if not scan_all or not page_token:
+                break
         
         print("\n✅ Processing Complete!")
 
-        print(f"   - Emails Scanned: {result['emails_checked']}")
-        print(f"   - Vouchers Found: {result['vouchers_found']}")
-        print(f"   - Rows Added:     {result['rows_added']}")
+        print(f"   - Emails Scanned: {total['emails_checked']}")
+        print(f"   - Vouchers Found: {total['vouchers_found']}")
+        print(f"   - Rows Added:     {total['rows_added']}")
         
-        if result['errors']:
+        if total['errors']:
             print("\n⚠️  Errors encountered during processing:")
-            for err in result['errors']:
+            for err in total['errors']:
                 print(f"   - {err}")
         else:
             print("\n✨ No errors encountered.")

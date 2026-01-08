@@ -41,8 +41,11 @@ chmod +x scripts/*.sh deploy.sh
     *   **App Information**: Enter *App Name* (e.g., "Gyftr Scraper") and select your email for *User Support Email*.
     *   **Contact Information**: Enter your email address again for *Developer Contact Information*.
     *   **Finish**: Check the box for **"I agree to the Google API services user data policy"** and click **Continue**.
-    *   **Test Users (Critical)**: On the Test Users step, click **Add Users**, enter your Google email address, and click **Save**.
-        *   *Note: Without this, you will get an "Access Blocked: Authorization Error 403" when logging in.*
+    *   **Publishing status**: If asked, keep it on **Testing** while you’re setting this up.
+        *   Note: In **Testing** mode, Google issues refresh tokens that can expire (commonly ~7 days) for external apps.
+        *   If you want long-running automation without re-auth, you can switch to **In production** later (you may still see the “unverified app” warning, but it works for personal use).
+    *   **Test Users (Critical)**: On the Test Users step, click **Add Users**, add the exact Google account you’ll sign in with (e.g. `you@gmail.com`), and click **Save**.
+        *   *If you skip this while in Testing, you will see: “Access blocked … can only be accessed by developer-approved testers” (403 `access_denied`).*
     *   Once created, click **Credentials** on the left sidebar to return.
 3.  Click **Create Credentials** -> **OAuth Client ID**.
     *   *Note: If you see a "Metrics" dashboard with a "Create OAuth client" button, click that instead.*
@@ -54,7 +57,7 @@ chmod +x scripts/*.sh deploy.sh
 **Step 3: Connect & Initial Scan**
 1.  Run the authentication script:
     ```bash
-    python scripts/setup_auth.py
+    python3 scripts/setup_auth.py
     ```
     *   *This generates your local login token.*
 2.  Your browser will open to a Google permission screen.
@@ -64,10 +67,12 @@ chmod +x scripts/*.sh deploy.sh
         *   Click **Advanced** (small link).
         *   Click **Go to Gyftr Scraper (unsafe)**.
         *   Proceed to grant permissions.
+    *   **If you see “Access blocked … developer-approved testers”**: you are not added as a Test User on the OAuth consent screen (or you are signing in with a different Google account). Add your email under **OAuth consent screen → Test users**, wait a minute, and retry.
 3.  Run the backfill script:
     ```bash
-    python scripts/backfill_vouchers.py
+    python3 scripts/backfill_vouchers.py
     ```
+    *   It will ask how many emails to scan per batch and whether to scan **all** matching emails.
 *   **Result**: You now have a Google Sheet full of your past vouchers!
     *   *Columns*: Brand, Logo, Value, Code, Pin, Expiry, Email Date, etc.
 *   **Stop here** if you only want to run this manually once in a while.
@@ -126,16 +131,16 @@ Run this script to enable Cloud Functions and triggers.
 *   A: The Sheet uses links to brand logos extracted from emails. Google Sheets may ask for permission to display these external images. Click "Allow Access" if prompted.
 
 **Q: I get "invalid_grant" or "Token has been expired" error.**
-*   A: Your login token expired or was revoked. Run `python scripts/setup_auth.py` again to re-login.
+*   A: Your login token expired or was revoked. Run `python3 scripts/setup_auth.py` again to re-login.
 
 **Q: I get "403 Permission Denied" when writing to Sheets.**
 *   A: Make sure the Google Sheets API is enabled. If running in the cloud, ensure `deploy.sh` was run *after* enabling the APIs.
 
 **Q: I opened (read) the voucher email and it didn't get added.**
 *   A: Cloud mode supports READ emails (it uses Gmail push `historyId` + Gmail History API). If it’s not updating:
-    *   Re-enable Gmail Watch: `python scripts/enable_cloud_watch.py`
-    *   Check logs (Gen2 runs on Cloud Run):
-        `gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="gyftr-automation-v1"' --limit=50 --freshness=1h`
+    *   Re-enable Gmail Watch: `python3 scripts/enable_cloud_watch.py`
+    *   Check logs:
+        `gcloud functions logs read gyftr-automation-v1 --region us-central1 --limit 50`
     *   The bot stores a cursor in the spreadsheet under a `_config` tab (`LAST_GMAIL_HISTORY_ID`).
 
 ## 💰 Cost & Limits
@@ -148,9 +153,6 @@ For typical personal use, this project runs entirely within the **Google Cloud F
 | **Cloud Functions** | ~100 invocations | **$0.00** | 2,000,000 invocations/mo |
 | **Pub/Sub** | ~100 messages | **$0.00** | 10 GB/mo |
 | **Cloud Build** | ~5-10 deploys/mo | **$0.00** | 120 build-minutes/day |
-| **Artifact Registry** | storing docker images | **~ $0 - $0.10** | 0.5 GB/mo storage is free |
-
-*Note: The deployment script automatically deletes old container images (keeping only the recent 2) to ensure you stay within the free storage limit.*
 
 ### System Limits
 
@@ -173,7 +175,7 @@ For typical personal use, this project runs entirely within the **Google Cloud F
 *   Double-check these files are NOT tracked before pushing:
     `git ls-files token.json credentials.json .env`
 *   Avoid pasting raw `gcloud functions deploy ...` output into issues/chats. GCP can print environment variables in CLI output.
-*   If you accidentally exposed `CLIENT_SECRET` or `REFRESH_TOKEN`, rotate them in Google Cloud Console and re-run `python scripts/setup_auth.py`.
+*   If you accidentally exposed `CLIENT_SECRET` or `REFRESH_TOKEN`, rotate them in Google Cloud Console and re-run `python3 scripts/setup_auth.py`.
 
 ## 🤝 Contributing
 

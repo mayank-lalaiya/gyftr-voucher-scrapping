@@ -114,15 +114,12 @@ if ! gcloud services enable \
     gmail.googleapis.com \
     sheets.googleapis.com \
     cloudfunctions.googleapis.com \
-    run.googleapis.com \
-    artifactregistry.googleapis.com \
     cloudbuild.googleapis.com \
-    eventarc.googleapis.com \
     pubsub.googleapis.com; then
 
     echo -e "\n${RED}❌ Failed to enable APIs.${NC}"
     echo -e "${YELLOW}⚠️  CRITICAL: Billing is likely disabled.${NC}"
-    echo "Google Cloud Functions & Cloud Run require a Billing Account (even for Free Tier usage)."
+    echo "Google Cloud Functions requires a Billing Account (even for Free Tier usage)."
     echo "This is a Google requirement to prevent abuse."
     echo ""
     echo -e "👉 Action Required: Enable Billing for project '$PROJECT_ID' here:"
