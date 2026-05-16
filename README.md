@@ -92,13 +92,22 @@ Run this script to enable Cloud Functions and triggers.
 ./scripts/setup_gcp_infra.sh
 ```
 *   *It will detect your project and create the necessary resources.*
+*   *It enables the required APIs: Gmail, Sheets, Cloud Functions, Cloud Build, Pub/Sub, and **Cloud Scheduler**.*
 *   *It will automatically connect your Gmail to the Cloud bot if you have run Stage 1.*  
+
+> **Note**: If you already ran `setup_gcp_infra.sh` before the Cloud Scheduler API was added, enable it manually:
+> ```bash
+> gcloud services enable cloudscheduler.googleapis.com --project=YOUR_PROJECT_ID
+> ```
 
 **Step 2: Deploy Bot**
 ```bash
 ./deploy.sh
 ```
-*   **Result**: The logic is now deployed to Google Cloud.
+*   **Result**: The deploy script does three things:
+    1.  Deploys the main **email processing** Cloud Function (Pub/Sub triggered).
+    2.  Deploys a **watch renewal** Cloud Function (HTTP triggered, not publicly accessible).
+    3.  Creates a **Cloud Scheduler** job that calls the renewal function every 6 days to keep Gmail push notifications active (they expire every 7 days).
 *   **Test**: Reply to a GyFTR email or wait for a new one. It will appear in your sheet in ~30 seconds.
 
 ---
@@ -108,8 +117,8 @@ Run this script to enable Cloud Functions and triggers.
 
 ```text
 .
-├── deploy.sh               # script to deploy to Cloud Functions
-├── main.py                 # Cloud Function entry point (Event listener)
+├── deploy.sh               # Deploys Cloud Functions + sets up Cloud Scheduler
+├── main.py                 # Cloud Function entry points (email processing + watch renewal)
 ├── requirements.txt        # Python dependencies
 ├── scripts/
 │   ├── setup_local_infra.sh   # (Option A) Setup for local running
@@ -138,10 +147,26 @@ Run this script to enable Cloud Functions and triggers.
 
 **Q: I opened (read) the voucher email and it didn't get added.**
 *   A: Cloud mode supports READ emails (it uses Gmail push `historyId` + Gmail History API). If it’s not updating:
-    *   Re-enable Gmail Watch: `python3 scripts/enable_cloud_watch.py`
+    *   The Gmail Watch auto-renews every 6 days via Cloud Scheduler. If it stopped, you can manually renew:
+        ```bash
+        python3 scripts/enable_cloud_watch.py
+        ```
+    *   Or trigger the renewal function directly:
+        ```bash
+        gcloud scheduler jobs run gyftr-renew-gmail-watch --location us-central1
+        ```
     *   Check logs:
-        `gcloud functions logs read gyftr-automation-v1 --region us-central1 --limit 50`
+        ```bash
+        gcloud functions logs read gyftr-automation-v1 --region us-central1 --limit 50
+        gcloud functions logs read gyftr-renew-watch --region us-central1 --limit 10
+        ```
     *   The bot stores a cursor in the spreadsheet under a `_config` tab (`LAST_GMAIL_HISTORY_ID`).
+
+**Q: Gmail Watch expired and emails stopped being processed.**
+*   A: Gmail push notifications expire every 7 days. The `deploy.sh` script sets up Cloud Scheduler to auto-renew every 6 days. If it's not working:
+    1.  Check the scheduler job: `gcloud scheduler jobs describe gyftr-renew-gmail-watch --location us-central1`
+    2.  Run it manually: `gcloud scheduler jobs run gyftr-renew-gmail-watch --location us-central1`
+    3.  As a fallback, run locally: `python3 scripts/enable_cloud_watch.py`
 
 ## 💰 Cost & Limits
 
@@ -152,8 +177,7 @@ For typical personal use, this project runs entirely within the **Google Cloud F
 | :--- | :--- | :--- | :--- |
 | **Cloud Functions** | ~100 invocations | **$0.00** | 2,000,000 invocations/mo |
 | **Pub/Sub** | ~100 messages | **$0.00** | 10 GB/mo |
-| **Cloud Build** | ~5-10 deploys/mo | **$0.00** | 120 build-minutes/day |
-
+| **Cloud Build** | ~5-10 deploys/mo | **$0.00** | 120 build-minutes/day || **Cloud Scheduler** | ~5 jobs/mo (watch renewal) | **$0.00** | 3 free jobs/account |
 ### System Limits
 
 1.  **Batch Size**: Cloud mode processes incrementally (Gmail History API) and caps the number of messages processed per run. Local backfill can scan larger ranges in batches.

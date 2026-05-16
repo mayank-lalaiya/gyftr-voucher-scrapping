@@ -115,7 +115,8 @@ if ! gcloud services enable \
     sheets.googleapis.com \
     cloudfunctions.googleapis.com \
     cloudbuild.googleapis.com \
-    pubsub.googleapis.com; then
+    pubsub.googleapis.com \
+    cloudscheduler.googleapis.com; then
 
     echo -e "\n${RED}❌ Failed to enable APIs.${NC}"
     echo -e "${YELLOW}⚠️  CRITICAL: Billing is likely disabled.${NC}"

@@ -1,6 +1,9 @@
 """
 Cloud Function to process GyFTR Gmail notifications.
 Triggered by Pub/Sub when new emails arrive.
+
+Also includes a scheduled HTTP function to renew the Gmail Watch,
+which expires every 7 days.
 """
 
 import sys
@@ -79,3 +82,49 @@ def process_pubsub_message_gen1(event, context):
         error_msg = f"Critical error in execution: {str(e)}\n{traceback.format_exc()}"
         print(error_msg)
         raise
+
+
+def renew_gmail_watch(request):
+    """HTTP Cloud Function to renew Gmail push notifications.
+
+    Gmail watch() expires every 7 days. This function is called by
+    Cloud Scheduler to renew it automatically.
+
+    Args:
+        request: Flask request object (unused).
+
+    Returns:
+        Tuple of (response_body, status_code).
+    """
+    try:
+        from googleapiclient.discovery import build
+        from google.oauth2.credentials import Credentials
+
+        settings = Settings()
+        valid, missing = settings.validate()
+        if not valid:
+            msg = f"Missing config: {', '.join(missing)}"
+            print(f"❌ {msg}")
+            return (json.dumps({"error": msg}), 500)
+
+        creds = Credentials.from_authorized_user_info(settings.gmail_credentials)
+        service = build('gmail', 'v1', credentials=creds)
+
+        project_id = os.environ.get('PROJECT_ID', '')
+        topic_name = os.environ.get('PUBSUB_TOPIC', 'gmail-notifications')
+        full_topic = f"projects/{project_id}/topics/{topic_name}"
+
+        result = service.users().watch(
+            userId='me',
+            body={'labelIds': ['INBOX'], 'topicName': full_topic},
+        ).execute()
+
+        expiration = result.get('expiration', 'unknown')
+        print(f"✅ Gmail Watch renewed. Expiration: {expiration}")
+        return (json.dumps({"status": "renewed", "expiration": expiration}), 200)
+
+    except Exception as e:
+        import traceback
+        error_msg = f"Failed to renew Gmail Watch: {str(e)}\n{traceback.format_exc()}"
+        print(error_msg)
+        return (json.dumps({"error": str(e)}), 500)

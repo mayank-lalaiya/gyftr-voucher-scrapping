@@ -3,6 +3,7 @@ Service for processing GyFTR emails and updating Google Sheets.
 """
 import base64
 import re
+from email.utils import parsedate_to_datetime
 from typing import List, Dict, Any
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -101,7 +102,8 @@ class GyftrProcessingService:
                     
                     payload = message['payload']
                     headers = {h['name']: h['value'] for h in payload['headers']}
-                    email_date = headers.get('Date', 'Unknown')
+                    email_date_raw = headers.get('Date', 'Unknown')
+                    email_date = self._parse_email_date(email_date_raw)
                     subject = headers.get('Subject', 'Unknown')
                     
                     # Log what we are processing to help debugging
@@ -140,9 +142,7 @@ class GyftrProcessingService:
 
             # 2. Update to Google Sheet
             if all_new_vouchers:
-                # If Automation: Insert at Top. If Backfill: Append to Bottom.
-                insert_at_top = (source != 'backfill')
-                self._update_sheet(all_new_vouchers, insert_at_top=insert_at_top)
+                self._update_sheet(all_new_vouchers, insert_at_top=True)
                 result['rows_added'] = len(all_new_vouchers)
 
         except Exception as e:
@@ -263,7 +263,8 @@ class GyftrProcessingService:
                 if 'gifts@gyftr.com' not in sender.lower():
                     continue
 
-                email_date = headers.get('Date', 'Unknown')
+                email_date_raw = headers.get('Date', 'Unknown')
+                email_date = self._parse_email_date(email_date_raw)
                 subject = headers.get('Subject', 'Unknown')
                 print(f"Scanning email (history): {msg_id} | {email_date} | {subject[:50]}...")
 
@@ -294,14 +295,23 @@ class GyftrProcessingService:
                 result['errors'].append(f"Error processing email {msg_id}: {e}")
 
         if all_new_vouchers:
-            insert_at_top = True
             try:
-                self._update_sheet(all_new_vouchers, insert_at_top=insert_at_top)
+                self._update_sheet(all_new_vouchers)
                 result['rows_added'] = len(all_new_vouchers)
             except Exception as e:
                 result['errors'].append(f"Sheet update failed: {e}")
 
         return result
+
+    @staticmethod
+    def _parse_email_date(raw_date: str) -> str:
+        """Parse RFC 2822 email date into a sortable datetime string (IST)."""
+        try:
+            dt = parsedate_to_datetime(raw_date)
+            dt_ist = dt.astimezone(ZoneInfo("Asia/Kolkata"))
+            return dt_ist.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return raw_date
 
     def _get_html_content(self, msg_payload):
         """Recursively find HTML content in message payload."""
@@ -321,8 +331,8 @@ class GyftrProcessingService:
                 return base64.urlsafe_b64decode(data).decode('utf-8')
         return None
 
-    def _update_sheet(self, vouchers: List[Dict[str, Any]], insert_at_top: bool = False):
-        """Updates the Google Sheet with new vouchers."""
+    def _update_sheet(self, vouchers: List[Dict[str, Any]], insert_at_top: bool = True):
+        """Updates the Google Sheet with new vouchers, sorted by Email Date."""
         service = self.get_sheets_service()
         # Use settings ID
         spreadsheet_id = self.settings.gyftr_spreadsheet_id
@@ -354,6 +364,7 @@ class GyftrProcessingService:
             try:
                 sheet_id = sheets[0]['properties']['sheetId']
                 expiry_col_index = headers.index('Expiry')
+                email_date_col_index = headers.index('Email Date')
                 created_at_col_index = headers.index('Created At')
                 
                 requests = [
@@ -375,7 +386,25 @@ class GyftrProcessingService:
                             "fields": "userEnteredFormat.numberFormat"
                         }
                     },
-                     {
+                    {
+                        "repeatCell": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startColumnIndex": email_date_col_index,
+                                "endColumnIndex": email_date_col_index + 1
+                            },
+                            "cell": {
+                                "userEnteredFormat": {
+                                    "numberFormat": {
+                                        "type": "DATE_TIME",
+                                        "pattern": "yyyy-mm-dd hh:mm:ss"
+                                    }
+                                }
+                            },
+                            "fields": "userEnteredFormat.numberFormat"
+                        }
+                    },
+                    {
                         "repeatCell": {
                             "range": {
                                 "sheetId": sheet_id,
@@ -397,7 +426,7 @@ class GyftrProcessingService:
                 service.spreadsheets().batchUpdate(
                     spreadsheetId=spreadsheet_id, body={'requests': requests}
                 ).execute()
-                print("✅ Applied Date formatting to 'Expiry' and 'Created At' columns.")
+                print("✅ Applied Date formatting to 'Expiry', 'Email Date', and 'Created At' columns.")
             except Exception as e:
                 print(f"⚠️ Warning: Could not set date formatting: {e}")
         else:
@@ -424,10 +453,14 @@ class GyftrProcessingService:
 
         # Or better, read the whole sheet to check for duplicates based on Message ID or Code
         existing_data_range = f"{sheet_title}!A2:Z"
-        existing_result = service.spreadsheets().values().get(
-            spreadsheetId=spreadsheet_id, range=existing_data_range
-        ).execute()
-        existing_rows = existing_result.get('values', [])
+        try:
+            existing_result = service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id, range=existing_data_range
+            ).execute()
+            existing_rows = existing_result.get('values', [])
+        except Exception:
+            # Sheet may only have the header row (e.g. after a clear)
+            existing_rows = []
         
         # Create a set of existing unique identifiers (e.g., Code)
         existing_codes = set()
@@ -477,11 +510,9 @@ class GyftrProcessingService:
             print("No new unique vouchers to append.")
             return
 
-        # Strategy: Insert At Top vs Append
-        if insert_at_top:
-            self._insert_rows_at_top(service, spreadsheet_id, sheet_title, sheet_id, rows_to_append)
-        else:
-            self._append_rows_at_bottom(service, spreadsheet_id, sheet_title, rows_to_append)
+        # Always insert at top, then sort by Email Date descending
+        self._insert_rows_at_top(service, spreadsheet_id, sheet_title, sheet_id, rows_to_append)
+        self._sort_sheet_by_email_date(service, spreadsheet_id, sheet_id, headers)
 
     def _ensure_logo_first_column(self, service, spreadsheet_id: str, sheet_title: str, sheet_id: int, headers: list[str]) -> list[str]:
         """Ensure the 'Logo' column exists and is physically at column A."""
@@ -642,8 +673,18 @@ class GyftrProcessingService:
         return message_ids
 
     def _insert_rows_at_top(self, service, spreadsheet_id, sheet_title, sheet_id, rows):
-        """Inserts rows at index 1 (Row 2)."""
+        """Inserts rows at index 1 (Row 2). Falls back to append on empty sheets."""
         print(f"Inserting {len(rows)} rows at the TOP...")
+
+        # Check current row count — insertDimension at index 1 fails if only 1 row exists
+        meta = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+        current_rows = meta['sheets'][0]['properties']['gridProperties']['rowCount']
+
+        if current_rows <= 1:
+            # Sheet only has header; append instead (sort will reorder later)
+            self._append_rows_at_bottom(service, spreadsheet_id, sheet_title, rows)
+            return
+
         requests = [{
             "insertDimension": {
                 "range": {
@@ -680,4 +721,31 @@ class GyftrProcessingService:
             valueInputOption="USER_ENTERED", insertDataOption="INSERT_ROWS",
             body={'values': rows}
         ).execute()
-        print(f"Appended {len(rows)} rows to spreadsheet {spreadsheet_id}")
+
+    def _sort_sheet_by_email_date(self, service, spreadsheet_id, sheet_id, headers):
+        """Sort the entire sheet by Email Date column, descending (newest first)."""
+        if 'Email Date' not in headers:
+            print("⚠️ 'Email Date' column not found; skipping sort.")
+            return
+
+        email_date_col_index = headers.index('Email Date')
+        print("Sorting sheet by Email Date (newest first)...")
+        try:
+            requests = [{
+                "sortRange": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 1,  # skip header row
+                    },
+                    "sortSpecs": [{
+                        "dimensionIndex": email_date_col_index,
+                        "sortOrder": "DESCENDING",
+                    }],
+                }
+            }]
+            service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id, body={'requests': requests}
+            ).execute()
+            print("✅ Sheet sorted by Email Date.")
+        except Exception as e:
+            print(f"⚠️ Warning: Could not sort sheet: {e}")

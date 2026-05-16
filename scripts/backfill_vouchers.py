@@ -114,6 +114,10 @@ def manual_process():
         print(f"   - Emails Scanned: {total['emails_checked']}")
         print(f"   - Vouchers Found: {total['vouchers_found']}")
         print(f"   - Rows Added:     {total['rows_added']}")
+
+        spreadsheet_id = factory.settings.gyftr_spreadsheet_id
+        if spreadsheet_id:
+            print(f"\n📊 View your vouchers: https://docs.google.com/spreadsheets/d/{spreadsheet_id}")
         
         if total['errors']:
             print("\n⚠️  Errors encountered during processing:")
