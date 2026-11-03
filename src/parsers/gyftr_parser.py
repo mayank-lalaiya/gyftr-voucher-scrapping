@@ -34,6 +34,7 @@ FIELD_MAPPING = {
     'Gift Voucher Value': 'Value',
     'Voucher Value': 'Value',
     'Gift Card Value': 'Value',
+    'Face Value': 'Value',
     
     # Pins
     'Gift Voucher Pin': 'Pin',
@@ -49,10 +50,70 @@ FIELD_MAPPING = {
     'Valid Till': 'Expiry',
 }
 
+
+def _extract_legacy_vouchers(soup):
+    text = ' '.join(soup.stripped_strings)
+    text = re.sub(r'\s+', ' ', text)
+    brand = 'Unknown Brand'
+    for pattern in (
+        r'Thank you for buying (.+?) from Gyftr',
+        r'Please find your (.+?) from Gyftr',
+        r'Shopping at GyFTR for (.+?)\s*\.\s*(?:Pls|Please)',
+        r'Terms & Conditions\s*1\.\s*(.+?)\s+E-\s*Gift Card is issued',
+    ):
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            brand = match.group(1).strip()
+            break
+
+    field_mapping = {label.casefold(): field for label, field in FIELD_MAPPING.items()}
+    field_mapping['gcid'] = 'GCID'
+    vouchers = []
+    for table in soup.find_all('table'):
+        rows = [row for row in table.find_all('tr') if row.find_parent('table') is table]
+        for index, row in enumerate(rows):
+            labels = [
+                ' '.join(cell.stripped_strings).strip().rstrip(':').casefold()
+                for cell in row.find_all(['td', 'th'], recursive=False)
+            ]
+            fields = [field_mapping.get(label) for label in labels]
+            if 'Code' not in fields or not {'Value', 'Expiry'}.intersection(fields):
+                continue
+
+            for data_row in rows[index + 1:]:
+                cells = data_row.find_all(['td', 'th'], recursive=False)
+                if len(cells) != len(fields):
+                    if data_row.get_text(strip=True):
+                        print("⚠️ Warning: Skipping a legacy voucher row with mismatched columns.")
+                    continue
+                values = {
+                    field: cell.get_text(strip=True)
+                    for field, cell in zip(fields, cells) if field
+                }
+                code = values.get('Code', '')
+                if code and code.casefold() not in field_mapping:
+                    vouchers.append({'Brand': brand, **values})
+            break
+
+    if not vouchers:
+        pattern = (
+            r'Voucher\s+Code\s*:\s*(\S+)\s+'
+            r'Face\s+Value\s*:\s*([\d,.]+)\s+'
+            r'Valid\s+Till\s*:\s*(\d{1,2}\s+[A-Za-z]+\s+\d{4})'
+        )
+        for code, value, expiry in re.findall(pattern, text, re.IGNORECASE):
+            vouchers.append({
+                'Brand': brand, 'Code': code, 'Value': value, 'Expiry': expiry,
+            })
+    return vouchers
+
+
 def extract_vouchers_from_html(html):
     """
     Extracts voucher details from GYFTR email HTML.
     Returns a list of dictionaries, where each dictionary represents a voucher.
+    Unexpected parsing errors are logged and re-raised so callers can retry,
+    rather than treating a failed parse as an empty result.
     """
     if not html:
         print("⚠️ Warning: Empty HTML content passed to parser.")
@@ -177,9 +238,8 @@ def extract_vouchers_from_html(html):
                  # If we found a brand but no details, it might be a false positive or layout change
                  print(f"⚠️ Warning: Found brand '{brand_name}' but no details could be extracted. Check HTML layout.")
             
-        return vouchers
+        return vouchers or _extract_legacy_vouchers(soup)
 
     except Exception as e:
         print(f"❌ Critical Error in HTML Parser: {e}")
-        return []
-
+        raise

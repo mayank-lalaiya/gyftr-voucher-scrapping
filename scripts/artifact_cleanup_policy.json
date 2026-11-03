@@ -1,0 +1,12 @@
+[
+  {
+    "name": "delete-deployment-artifacts-after-one-day",
+    "action": {
+      "type": "Delete"
+    },
+    "condition": {
+      "tagState": "any",
+      "olderThan": "1d"
+    }
+  }
+]

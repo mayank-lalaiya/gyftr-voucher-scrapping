@@ -10,7 +10,8 @@ import sys
 import os
 import base64
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 
 # Logic to add root to path if running mostly for local debug, 
 # but in Cloud Functions, root is already CWD.
@@ -28,55 +29,112 @@ try:
 except ImportError:
     pass
 
+
+MAX_NOTIFICATION_AGE = timedelta(hours=24)
+
+
+class RetryableProcessingError(RuntimeError):
+    """Request Gen1 redelivery when retry-on-failure is enabled."""
+
+
+@lru_cache(maxsize=1)
+def _get_service_factory() -> ServiceFactory:
+    return ServiceFactory()
+
+
+def _notification_created_at(context) -> datetime:
+    timestamp = getattr(context, 'timestamp', None)
+    if not isinstance(timestamp, str):
+        raise ValueError('Missing Gmail event timestamp')
+    try:
+        created_at = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+    except ValueError as e:
+        raise ValueError('Invalid Gmail event timestamp') from e
+    if created_at.tzinfo is None or created_at.utcoffset() is None:
+        raise ValueError('Gmail event timestamp must include a timezone')
+    return created_at
+
+
+def _notification_history_id(event) -> str:
+    if not isinstance(event, dict):
+        raise ValueError('Pub/Sub event must be an object')
+    data = event.get('data')
+    if not isinstance(data, (str, bytes)) or not data:
+        raise ValueError('Missing base64-encoded Pub/Sub data')
+    try:
+        payload = json.loads(base64.b64decode(data, validate=True).decode('utf-8'))
+    except (ValueError, TypeError) as e:
+        raise ValueError('Pub/Sub data must be base64-encoded UTF-8 JSON') from e
+    if not isinstance(payload, dict):
+        raise ValueError('Gmail notification must be a JSON object')
+    history_id = payload.get('historyId')
+    if isinstance(history_id, bool) or not isinstance(history_id, (str, int)):
+        raise ValueError('Gmail notification must include a positive historyId')
+    history_id = str(history_id).strip()
+    if not history_id.isascii() or not history_id.isdecimal() or int(history_id) <= 0:
+        raise ValueError('Gmail notification must include a positive historyId')
+    return history_id
+
+
 def process_pubsub_message_gen1(event, context):
     """Gen1 Cloud Function entrypoint (Pub/Sub background function).
 
+    Failures and unfinished batches request redelivery through Gen1 retries.
+    Events at least 24 hours old are acknowledged without processing, leaving
+    any pending work saved for a fresh notification or manual recovery.
+
     Args:
         event: Pub/Sub event payload dict. `event['data']` is base64-encoded bytes.
-        context: Event metadata (unused).
+        context: Event metadata, including its original creation timestamp.
     """
     try:
-        factory = ServiceFactory()
+        created_at = _notification_created_at(context)
+        history_id = _notification_history_id(event)
+    except ValueError as e:
+        print(f"ERROR: Discarding invalid Gmail notification without processing: {e}")
+        return {'status': 'rejected', 'reason': str(e)}
+
+    now = datetime.now(timezone.utc)
+    if now - created_at >= MAX_NOTIFICATION_AGE:
+        print(
+            "ERROR: Gmail notification expired after its 24-hour retry window. "
+            "Acknowledging without processing; existing pending work is unchanged. "
+            "A fresh notification or manual recovery is required."
+        )
+        return {'status': 'expired', 'reason': '24-hour retry window exhausted'}
+
+    try:
+        factory = _get_service_factory()
         factory.validate_configuration()
 
-        print(f"Function (gen1) triggered at {datetime.utcnow().isoformat()}")
-
-        history_id = None
-        try:
-            data_b64 = event.get('data')
-            if data_b64:
-                decoded = base64.b64decode(data_b64).decode('utf-8')
-                message_data = json.loads(decoded)
-                history_id = message_data.get('historyId')
-                print(
-                    f"Received notification: historyId={message_data.get('historyId', 'N/A')}, "
-                    f"email={message_data.get('emailAddress', 'N/A')}"
-                )
-            else:
-                print("Received Pub/Sub event with no data")
-        except Exception as e:
-            print(f"Warning: failed to decode Pub/Sub data: {e}")
+        print(f"Function (gen1) triggered at {now.isoformat()}")
+        print(f"Received Gmail notification: historyId={history_id}")
 
         print("--- Processing GyFTR Emails ---")
         gyftr_service = factory.get_gyftr_processing_service()
-
-        if history_id:
-            result = gyftr_service.process_from_gmail_history(
-                current_history_id=str(history_id),
-                source="cloud_function_automation",
-            )
-        else:
-            # Fallback if payload doesn't include historyId
-            result = gyftr_service.process_new_gyftr_emails(
-                source="cloud_function_automation",
-                include_read=True,
-            )
+        result = gyftr_service.process_from_gmail_history(
+            current_history_id=history_id,
+            source="cloud_function_automation",
+        )
+        if (
+            not isinstance(result, dict)
+            or not isinstance(result.get('errors'), list)
+            or not isinstance(result.get('has_more'), bool)
+        ):
+            raise RetryableProcessingError('Invalid Gmail processing result; retry required')
 
         print(f"Result: {json.dumps(result)}")
+        if result['errors']:
+            raise RetryableProcessingError('Gmail processing reported errors; retry required')
+        if result['has_more']:
+            raise RetryableProcessingError('Gmail batch incomplete; retrying saved pending work')
         print("Processing complete")
         print("==================================================")
         return result
 
+    except RetryableProcessingError as e:
+        print(f"Retry requested: {e}")
+        raise
     except Exception as e:
         import traceback
         error_msg = f"Critical error in execution: {str(e)}\n{traceback.format_exc()}"

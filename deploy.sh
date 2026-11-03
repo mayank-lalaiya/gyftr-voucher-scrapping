@@ -84,9 +84,10 @@ DEPLOY_CMD=(gcloud functions deploy "$FUNCTION_NAME" \
     --source=. \
     --entry-point="$ENTRY_POINT" \
     --trigger-topic="$PUBSUB_TOPIC" \
+    --retry \
     --project="$PROJECT_ID" \
     --timeout=60s \
-    --memory=256MB \
+    --memory=512MB \
     --max-instances=1 \
     --set-env-vars GYFTR_SPREADSHEET_ID="$GYFTR_SPREADSHEET_ID" \
     --set-env-vars CLIENT_ID="$CLIENT_ID" \
@@ -195,5 +196,3 @@ else
 fi
 
 echo -e "\n${GREEN}🎉 All done! Your bot is live with automatic watch renewal.${NC}"
-
-
